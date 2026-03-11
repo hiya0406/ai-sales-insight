@@ -1,90 +1,33 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, status
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
-from pydantic import BaseModel, EmailStr
-from pydantic_settings import BaseSettings
 import pandas as pd
 import io
 import google.generativeai as genai
 import resend
 import os
-from typing import Optional
-import logging
 from datetime import datetime
+import re
+from pydantic import BaseModel
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Settings
-class Settings(BaseSettings):
-    gemini_api_key: str
-    resend_api_key: str
-    cors_origins: str = "http://localhost:3000"
-    max_file_size: int = 10 * 1024 * 1024  # 10MB
-    redis_url: str = "redis://localhost:6379"
-    
-    class Config:
-        env_file = ".env"
-
-settings = Settings()
-
-# Initialize rate limiter (using memory-based limiter for simplicity)
-limiter = Limiter(key_func=get_remote_address)
-
-# Initialize FastAPI app
-app = FastAPI(
-    title="AI Sales Insight Automation API",
-    description="API for processing sales data and generating AI-powered insights",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
-
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app = FastAPI(title="AI Sales Insight Automation API", version="1.0.0")
 
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins.split(","),
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Configure APIs
-genai.configure(api_key=settings.gemini_api_key)
-resend.api_key = settings.resend_api_key
+genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
+resend.api_key = os.getenv("RESEND_API_KEY", "")
 
-# Pydantic models
-class EmailRequest(BaseModel):
-    email: EmailStr
-
-class SalesInsightResponse(BaseModel):
-    success: bool
-    message: str
-    insight_id: Optional[str] = None
-
-def validate_file(file: UploadFile) -> None:
-    """Validate file type and size"""
-    if file.size > settings.max_file_size:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File size exceeds maximum limit of {settings.max_file_size // (1024*1024)}MB"
-        )
-    
-    allowed_extensions = {".csv", ".xlsx", ".xls"}
-    file_extension = os.path.splitext(file.filename)[1].lower()
-    
-    if file_extension not in allowed_extensions:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File type not supported. Allowed types: {', '.join(allowed_extensions)}"
-        )
+def validate_email(email):
+    """Simple email validation"""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
 
 def parse_sales_data(file: UploadFile) -> pd.DataFrame:
     """Parse CSV or Excel file"""
@@ -97,32 +40,24 @@ def parse_sales_data(file: UploadFile) -> pd.DataFrame:
         else:
             df = pd.read_excel(io.BytesIO(content))
         
-        # Basic validation
         if df.empty:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded file is empty or invalid"
-            )
+            raise HTTPException(status_code=400, detail="File is empty or invalid")
         
         return df
     except Exception as e:
-        logger.error(f"Error parsing file: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error parsing file: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Error parsing file: {str(e)}")
 
 def generate_sales_insight(df: pd.DataFrame) -> str:
-    """Generate AI-powered sales insight using Gemini"""
+    """Generate AI-powered sales insight"""
     try:
-        # Convert DataFrame to a readable format
+        # Convert DataFrame to readable format
         sales_data = df.to_string()
         
         # Create prompt for Gemini
         prompt = f"""
         Analyze the following sales data and generate an executive sales summary highlighting:
         - Total revenue
-        - Best selling product category
+        - Best selling product category  
         - Regional performance
         - Sales trends
         
@@ -132,93 +67,47 @@ def generate_sales_insight(df: pd.DataFrame) -> str:
         Please provide a professional, concise executive summary that would be valuable for business decision-making.
         """
         
-        # Try to use Gemini with error handling
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception as gemini_error:
-            logger.error(f"Gemini API error: {str(gemini_error)}")
-            # Return a basic analysis as fallback
-            return generate_basic_insight(df)
-            
-    except Exception as e:
-        logger.error(f"Error generating insight: {str(e)}")
-        return generate_basic_insight(df)
-
-def generate_basic_insight(df: pd.DataFrame) -> str:
-    """Generate basic sales insight without AI"""
-    try:
-        # Basic analysis
-        total_rows = len(df)
-        
-        # Try to find numeric columns
-        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        
-        insight = f"""
-AI Sales Insight Summary
-========================
-
-Dataset Overview:
-- Total records: {total_rows}
-- Columns analyzed: {len(df.columns)}
-
-Basic Analysis:
-"""
-        
-        if numeric_cols:
-            for col in numeric_cols[:3]:  # Limit to first 3 numeric columns
-                if df[col].notna().any():
-                    insight += f"\n- {col}: Range from {df[col].min():.2f} to {df[col].max():.2f}"
-                    insight += f"\n  Average: {df[col].mean():.2f}"
-        
-        # Add categorical analysis
-        categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
-        if categorical_cols:
-            insight += f"\n\nCategories Found:"
-            for col in categorical_cols[:3]:  # Limit to first 3 categorical columns
-                unique_values = df[col].value_counts().head(3)
-                insight += f"\n- {col}: {', '.join(unique_values.index.tolist())}"
-        
-        insight += f"""
-
-Note: This is a basic analysis. For AI-powered insights using Google Gemini, please ensure your API key is properly configured and has sufficient quota.
-"""
-        
-        return insight
+        # Use Gemini AI
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        return response.text
         
     except Exception as e:
+        # Fallback if AI fails
         return f"""
 AI Sales Insight Summary
 ========================
 
-Analysis completed successfully! Your sales data has been processed.
+Dataset Overview:
+- Total records: {len(df)}
+- Columns analyzed: {len(df.columns)}
 
-Key Findings:
-- Data structure analyzed
-- Patterns identified
-- Insights generated
+Basic Analysis:
+The sales data contains {len(df)} records with various columns.
+Key patterns and trends can be identified from the dataset.
 
-Note: For detailed AI-powered analysis, please check your Gemini API configuration.
-
-Technical Details: {str(e)}
-"""
+Note: This is a basic analysis. For detailed AI-powered insights, please ensure Gemini API is properly configured.
+        """
 
 async def send_email_insight(email: str, insight: str) -> None:
     """Send sales insight via email"""
     try:
         html_content = f"""
         <html>
-        <body>
-            <h2>📊 AI Sales Insight Report</h2>
-            <p><strong>Generated on:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-            <hr>
-            <div style="background-color: #f5f5f5; padding: 20px; border-radius: 5px;">
-                <h3>Executive Summary</h3>
-                <div style="white-space: pre-wrap;">{insight}</div>
+        <body style="font-family: Arial, sans-serif; margin: 20px;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
+                <h2 style="color: #333; text-align: center;">📊 AI Sales Insight Report</h2>
+                <p style="color: #666;"><strong>Generated on:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                <hr style="border: 1px solid #eee; margin: 20px 0;">
+                <div style="background-color: #f8f9fa; padding: 20px; border-radius: 5px;">
+                    <h3 style="color: #333; margin-top: 0;">Executive Summary</h3>
+                    <div style="white-space: pre-wrap; font-family: monospace; background: #fff; padding: 15px; border-radius: 3px;">{insight}</div>
+                </div>
+                <hr style="border: 1px solid #eee; margin: 20px 0;">
+                <p style="color: #666; font-size: 12px; text-align: center;">
+                    <em>This report was generated by AI Sales Insight Automation Tool</em>
+                </p>
             </div>
-            <hr>
-            <p><em>This report was generated by AI Sales Insight Automation Tool</em></p>
         </body>
         </html>
         """
@@ -231,14 +120,16 @@ async def send_email_insight(email: str, insight: str) -> None:
         }
         
         r = resend.Emails.send(params)
-        logger.info(f"Email sent successfully to {email}: {r}")
+        print(f"Email sent successfully to {email}: {r}")
         
     except Exception as e:
-        logger.error(f"Error sending email: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error sending email: {str(e)}"
-        )
+        print(f"Error sending email: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error sending email: {str(e)}")
+
+class SalesInsightResponse(BaseModel):
+    success: bool
+    message: str
+    insight_id: str = None
 
 @app.get("/")
 async def root():
@@ -251,9 +142,7 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 @app.post("/upload", response_model=SalesInsightResponse)
-@limiter.limit("5/minute")
 async def upload_and_process(
-    request: Request,
     file: UploadFile = File(...),
     email: str = Form(...)
 ):
@@ -261,31 +150,33 @@ async def upload_and_process(
     Upload sales data file and receive AI-generated insights via email
     
     - **file**: CSV or Excel file containing sales data
-    - **email**: Email address to send the insights to
+    - **email**: Email address to send insights to
     """
     try:
-        # Basic email validation
-        import re
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, email):
+        # Validate email
+        if not validate_email(email):
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=400,
                 detail="Invalid email address format"
             )
         
         # Validate file
-        validate_file(file)
+        if not file.filename:
+            raise HTTPException(
+                status_code=400,
+                detail="No file uploaded"
+            )
         
         # Parse sales data
-        logger.info(f"Parsing file: {file.filename}")
+        print(f"Parsing file: {file.filename}")
         df = parse_sales_data(file)
         
         # Generate AI insight
-        logger.info("Generating AI insight...")
+        print("Generating AI insight...")
         insight = generate_sales_insight(df)
         
         # Send email
-        logger.info(f"Sending insight to {email}")
+        print(f"Sending insight to {email}")
         await send_email_insight(email, insight)
         
         return SalesInsightResponse(
@@ -297,10 +188,10 @@ async def upload_and_process(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+        print(f"Unexpected error: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred. Please try again."
+            status_code=500,
+            detail=f"An unexpected error occurred: {str(e)}"
         )
 
 if __name__ == "__main__":
