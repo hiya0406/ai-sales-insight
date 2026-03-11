@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ai-sales-insight-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+        value: https://your-frontend-url.vercel.app
