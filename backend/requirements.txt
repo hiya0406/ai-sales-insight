@@ -1,7 +1,8 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-pandas==2.0.3
-openpyxl==3.0.10
-google-generativeai==0.3.2
-python-dotenv==1.0.0
-resend==0.8.0
+fastapi==0.68.0
+uvicorn==0.15.0
+pandas==1.1.5
+openpyxl==3.0.5
+google-generativeai==0.1.0
+python-dotenv==0.17.1
+resend==0.1.0
+numpy==1.19.5
