@@ -9,7 +9,7 @@ from datetime import datetime
 import re
 from pydantic import BaseModel
 
-app = FastAPI(title="AI Sales Insight Automation API", version="1.0.0")
+app = FastAPI()
 
 # CORS middleware
 app.add_middleware(

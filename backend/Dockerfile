@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
@@ -12,8 +12,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code from backend folder
-COPY backend/ .
+# Copy application code
+COPY . .
 
 # Expose port
 EXPOSE 8000
